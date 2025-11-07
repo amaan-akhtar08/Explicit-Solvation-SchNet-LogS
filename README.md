@@ -267,6 +267,11 @@ All numbers below were produced with the same **frozen splits** and your data.
 **Test (frame-level)**: **RMSE 0.5803**, **MAE 0.3906**, **R² 0.7917**
 **Test (pair-avg)**: **RMSE ≈ 0.5616**, **MAE ≈ 0.3726**
 
+<p align="center">
+  <img src="docs/figs/parity_fpp5_b5_r64_cut60_lr5e4.png" width="45%" alt="Parity plot">
+  <img src="docs/figs/residuals_fpp5_b5_r64_cut60_lr5e4.png" width="45%" alt="Residuals">
+</p>
+
 ### Seed stability (same best config; seeds 1337/2025/4242)
 
 * RMSE: **0.5971**, **0.5863**, **0.5863** → **mean 0.5899 ± 0.0062**
@@ -426,32 +431,49 @@ done
 
 ---
 
-## Plots
+## 📈 Figures
 
-The `docs/figs` directory contains visualizations of training results and model performance:
-
-### Training Curves
-- Individual learning curves for each run showing training and validation RMSE over epochs
-- Located in `docs/figs/curve_*.png`
-
-### Ablation Studies
-- Bar charts comparing RMSE, MAE, and R² across different model configurations
-- Files: `docs/figs/ablation_*.png`
-
-### Model Performance
-- Parity plot (predicted vs true values) for the best model
-- Residual distribution histogram
-- Files: `docs/figs/parity_*.png`, `docs/figs/residuals_*.png`
-
-### Seed Stability Analysis
-- Boxplots showing model performance across different random seeds
-- Files: `docs/figs/seed_stability_*.png`
-
-These plots were generated using the `scripts/make_figs.py` script. To regenerate them:
+Run this once after you have training outputs in `schnet_runs/`:
 
 ```bash
 python scripts/make_figs.py
 ```
 
----
+The script will create PNGs in `docs/figs/`:
 
+* `ablation_rmse.png`, `ablation_mae.png`, `ablation_r2.png` — bars aggregating `test_metrics.json` across all runs in `schnet_runs/*/`
+* `parity_<best-run>.png` — parity (y_true vs y_pred) on **pair-averaged** test predictions of the best run
+* `residuals_<best-run>.png` — histogram of residuals (y_pred − y_true) for the best run
+* `curve_<run>.png` — RMSE vs epoch for any run that has a `history.json`
+* `seed_stability_[rmse|mae|r2].png` — boxplots if you trained multiple seeds (folders like `..._seed1337`)
+
+### Suggested placements in README
+
+**Results section** (under your tables):
+
+```markdown
+<p align="center">
+  <img src="docs/figs/ablation_rmse.png" width="70%" alt="Ablation RMSE">
+</p>
+```
+
+**Best model visualization**:
+
+```markdown
+<p align="center">
+  <img src="docs/figs/parity_fpp5_b5_r64_cut60_lr5e4.png" width="45%" alt="Parity plot">
+  <img src="docs/figs/residuals_fpp5_b5_r64_cut60_lr5e4.png" width="45%" alt="Residuals">
+</p>
+```
+
+**Training curve** (if you want to show one run’s curve):
+
+```markdown
+<p align="center">
+  <img src="docs/figs/curve_fpp5_b5_r64_cut60_lr5e4.png" width="60%" alt="RMSE vs epoch">
+</p>
+```
+
+> Tip: If your best run folder name is different, just update the `<img src=...>` path accordingly.
+
+---
