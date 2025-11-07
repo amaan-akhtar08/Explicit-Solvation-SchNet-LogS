@@ -26,6 +26,7 @@ We train a compact **SchNet-style** GNN on atomistic coordinates, with **tempera
 13. [Reproducibility & seeds](#reproducibility--seeds)
 14. [Citations & credits](#citations--credits)
 15. [License](#license)
+16. [Plots](#plots)
 
 ---
 
@@ -422,6 +423,35 @@ done
 
 * **SchNet:** Schütt et al., *SchNet – A continuous-filter convolutional neural network for modeling quantum interactions.*
 * **This repo:** minimal SchNet + FiLM temperature conditioning + lazy XYZ loader.
+
+---
+
+## Plots
+
+The `docs/figs` directory contains visualizations of training results and model performance:
+
+### Training Curves
+- Individual learning curves for each run showing training and validation RMSE over epochs
+- Located in `docs/figs/curve_*.png`
+
+### Ablation Studies
+- Bar charts comparing RMSE, MAE, and R² across different model configurations
+- Files: `docs/figs/ablation_*.png`
+
+### Model Performance
+- Parity plot (predicted vs true values) for the best model
+- Residual distribution histogram
+- Files: `docs/figs/parity_*.png`, `docs/figs/residuals_*.png`
+
+### Seed Stability Analysis
+- Boxplots showing model performance across different random seeds
+- Files: `docs/figs/seed_stability_*.png`
+
+These plots were generated using the `scripts/make_figs.py` script. To regenerate them:
+
+```bash
+python scripts/make_figs.py
+```
 
 ---
 
