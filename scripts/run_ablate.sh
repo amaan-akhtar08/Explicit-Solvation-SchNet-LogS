@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ======= user paths =======
-PYTHON="${PYTHON:-python}"               # uses current venv; override if needed
+PYTHON="${PYTHON:-python}"               
 DATA_DIR="data"
 XYZ="${DATA_DIR}/combined_filtered_structures_with_energy.xyz"
 INDEX="${DATA_DIR}/xyz_index.csv"
