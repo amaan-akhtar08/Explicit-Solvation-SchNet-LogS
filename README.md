@@ -434,34 +434,3 @@ The script will create PNGs in `docs/figs/`:
 * `residuals_<best-run>.png` — histogram of residuals (y_pred − y_true) for the best run
 * `curve_<run>.png` — RMSE vs epoch for any run that has a `history.json`
 * `seed_stability_[rmse|mae|r2].png` — boxplots if you trained multiple seeds (folders like `..._seed1337`)
-
-### Suggested placements in README
-
-**Results section** (under your tables):
-
-```markdown
-<p align="center">
-  <img src="docs/figs/ablation_rmse.png" width="70%" alt="Ablation RMSE">
-</p>
-```
-
-**Best model visualization**:
-
-```markdown
-<p align="center">
-  <img src="docs/figs/parity_fpp5_b5_r64_cut60_lr5e4.png" width="45%" alt="Parity plot">
-  <img src="docs/figs/residuals_fpp5_b5_r64_cut60_lr5e4.png" width="45%" alt="Residuals">
-</p>
-```
-
-**Training curve** (if you want to show one run’s curve):
-
-```markdown
-<p align="center">
-  <img src="docs/figs/curve_fpp5_b5_r64_cut60_lr5e4.png" width="60%" alt="RMSE vs epoch">
-</p>
-```
-
-> Tip: If your best run folder name is different, just update the `<img src=...>` path accordingly.
-
----
