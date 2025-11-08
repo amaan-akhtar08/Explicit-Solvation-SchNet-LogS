@@ -1,0 +1,7 @@
+{
+  "epoch": [],
+  "train_rmse": [],
+  "val_rmse": [],
+  "val_mae": [],
+  "val_r2": []
+}

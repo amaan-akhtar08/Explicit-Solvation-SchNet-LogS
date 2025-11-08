@@ -9,5 +9,4 @@ __pycache__/
 # data / runs
 data/*.xyz
 data/*index*.csv
-schnet_runs/
 predictions/
