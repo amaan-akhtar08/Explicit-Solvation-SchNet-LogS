@@ -417,7 +417,7 @@ done
 
 ---
 
-## Figures
+## Plots
 
 Run this once after you have training outputs in `schnet_runs/`:
 
