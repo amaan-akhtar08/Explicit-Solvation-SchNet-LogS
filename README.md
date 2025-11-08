@@ -23,7 +23,7 @@ We train a compact **SchNet-style** GNN on atomistic coordinates, with **tempera
 10. [Script & CLI reference](#script--cli-reference)
 11. [Performance tips](#performance-tips)
 12. [Reproducibility & seeds](#reproducibility--seeds)
-13. [Citations](#citations--credits)
+13. [Citations](#citations)
 14. [Plots](#plots)
 
 ---
