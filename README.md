@@ -23,8 +23,8 @@ We train a compact **SchNet-style** GNN on atomistic coordinates, with **tempera
 10. [Script & CLI reference](#script--cli-reference)
 11. [Performance tips](#performance-tips)
 12. [Reproducibility & seeds](#reproducibility--seeds)
-13. [Citations](#citations)
-14. [Plots](#plots)
+13. [Plots](#plots)
+14. [Citations](#citations)
 
 ---
 
@@ -411,12 +411,6 @@ done
 
 ---
 
-## Citations
-
-* **SchNet:** Schütt et al., *SchNet – A continuous-filter convolutional neural network for modeling quantum interactions.*
-
----
-
 ## Plots
 
 Run this once after you have training outputs in `schnet_runs/`:
@@ -432,3 +426,10 @@ The script will create PNGs in `docs/figs/`:
 * `residuals_<best-run>.png` — histogram of residuals (y_pred − y_true) for the best run
 * `curve_<run>.png` — RMSE vs epoch for any run that has a `history.json`
 * `seed_stability_[rmse|mae|r2].png` — boxplots if you trained multiple seeds (folders like `..._seed1337`)
+
+---
+
+## Citations
+
+* **SchNet:** Schütt et al., *SchNet – A continuous-filter convolutional neural network for modeling quantum interactions.*
+
