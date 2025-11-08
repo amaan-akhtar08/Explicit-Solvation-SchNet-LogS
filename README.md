@@ -21,12 +21,11 @@ We train a compact **SchNet-style** GNN on atomistic coordinates, with **tempera
 8. [Results (reproducible)](#results-reproducible)
 9. [Inference / prediction](#inference--prediction)
 10. [Script & CLI reference](#script--cli-reference)
-11. [Troubleshooting](#troubleshooting)
-12. [Performance tips](#performance-tips)
-13. [Reproducibility & seeds](#reproducibility--seeds)
-14. [Citations & credits](#citations--credits)
-15. [License](#license)
-16. [Plots](#plots)
+11. [Performance tips](#performance-tips)
+12. [Reproducibility & seeds](#reproducibility--seeds)
+13. [Citations & credits](#citations--credits)
+14. [License](#license)
+15. [Plots](#plots)
 
 ---
 
@@ -375,17 +374,6 @@ Outputs:
 
 * `pred_frames.csv` (one row per frame)
 * `pred_by_pair.csv` (averaged per `pair_id`)
-
----
-
-## Troubleshooting
-
-* **CUDA not found / wrong wheels.** Install PyTorch matching your driver:
-
-  * cu121 wheels for CUDA 12.1+ drivers; cu118 for CUDA 11.8; or CPU-only.
-* **OOM (out of memory).** Lower `--batch_size` (8 → 6 → 4). If needed, reduce `--rbf` (64 → 48 → 32) or `--blocks` (5 → 4 → 3). You can also reduce `--frames_per_pair` (10 → 5 → 3).
-* **Slow dataloading.** Set `--num_workers` to 4 or 0 depending on node. Keep `--index_csv` on a fast local disk if possible.
-* **No frames selected.** Ensure `pair_id` values in `pairs_csv` match those in `xyz_index.csv` (string vs int issues). The code normalizes IDs, but mismatches can happen if input formatting is very different.
 
 ---
 
