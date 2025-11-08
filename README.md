@@ -414,7 +414,6 @@ done
 ## Citations
 
 * **SchNet:** Schütt et al., *SchNet – A continuous-filter convolutional neural network for modeling quantum interactions.*
-* **This repo:** minimal SchNet + FiLM temperature conditioning + lazy XYZ loader.
 
 ---
 
