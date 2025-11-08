@@ -1,7 +1,7 @@
 # Explicit-Solvation SchNet for LogS (mol/L)
 
 **Goal :** Predict aqueous solubility **LogS (mol/L)** for a *solute–solvent pair* using **explicit solvation** structures (one atomistic system = solute + solvent).
-We train a compact **SchNet-style** GNN on atomistic coordinates, with **temperature-conditioned readout**, and use a **lazy dataset** that streams from a large `.xyz` file via byte offsets—no heavy conversions required.
+We train a compact **SchNet-style** GNN on atomistic coordinates, with **temperature-conditioned readout**, and use a **lazy dataset** that streams from a large `.xyz` file via byte offsets.
 
 ---
 
