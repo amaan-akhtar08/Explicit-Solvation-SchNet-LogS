@@ -323,14 +323,29 @@ def main():
     for epoch in range(1, args.epochs+1):
         tr_loss = train_loop(model, train_loader, device, opt, scaler)
         val_metrics = eval_loop(model, val_loader, device, y_mu, y_sd)
+        history["epoch"].append(epoch)
+        history["train_rmse"].append(math.sqrt(tr_loss))  
+        history["val_rmse"].append(val_metrics["rmse"])
+        history["val_mae"].append(val_metrics["mae"])
+        history["val_r2"].append(val_metrics["r2"])
+
         sched.step(val_metrics["rmse"])
-        # ... (history logging as before)
+        
 
         improved = val_metrics["rmse"] < best_rmse - 1e-5
         if improved:
             best_rmse = val_metrics["rmse"]
             bad_epochs = 0
-            torch.save({"model": model.state_dict(), "args": vars(args)}, best_path)
+            torch.save(
+                {
+                    "model": model.state_dict(),
+                    "args": vars(args),
+                    "y_mu": float(y_mu),
+                    "y_sd": float(y_sd),
+                },
+                best_path,
+            )
+            # torch.save({"model": model.state_dict(), "args": vars(args)}, best_path)
         else:
             bad_epochs += 1
             if bad_epochs >= patience:
@@ -344,6 +359,8 @@ def main():
     # 8) Test
     ckpt = torch.load(best_path, map_location=device)
     model.load_state_dict(ckpt["model"])
+    y_mu = ckpt.get("y_mu", y_mu)
+    y_sd = ckpt.get("y_sd", y_sd)
     test_metrics = eval_loop(model, test_loader, device, y_mu, y_sd)
     with open(os.path.join(args.outdir, "test_metrics.json"), "w") as f:
         json.dump(test_metrics, f, indent=2)
