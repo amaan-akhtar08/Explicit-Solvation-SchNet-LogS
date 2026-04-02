@@ -1,8 +1,6 @@
 
-import os
 import re
-import io
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Any
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
@@ -154,3 +152,107 @@ class ExplicitSolvDataset(Dataset):
         T = torch.tensor([float(row["Temperature_K"])], dtype=torch.float32)  # [1]
         pid = torch.tensor([int(row["pair_id"])], dtype=torch.long)  # [1]
         return {"z": z, "pos": pos, "y": y, "T": T, "pair_id": pid}
+
+class PairGroupedExplicitSolvDataset(Dataset):
+    """
+    Pair-grouped lazy dataset used for attention pooling mode.
+    One sample = one pair_id with a list of selected frame byte offsets.
+    """
+    def __init__(
+        self,
+        xyz_path: str,
+        index_csv: str,
+        frames_csv: pd.DataFrame,
+        center: bool = True,
+    ):
+        self.xyz_path = xyz_path
+        self.idx = pd.read_csv(index_csv) if isinstance(index_csv, str) else index_csv.copy()
+        self.frames = frames_csv.reset_index(drop=True).copy()
+        self.center = center
+
+        if "byte_offset" in self.frames.columns and "byte_offset" in self.idx.columns:
+            self.frames = self.frames.merge(
+                self.idx[["byte_offset", "natoms"]],
+                on="byte_offset",
+                how="inner"
+            )
+        assert {"Temperature_K", "LogS", "pair_id", "byte_offset"}.issubset(self.frames.columns), \
+            "frames_csv must include ['Temperature_K','LogS','pair_id','byte_offset']."
+
+        y_col = "LogS_z" if "LogS_z" in self.frames.columns else "LogS"
+        self.y_col = y_col
+
+        grouped_rows: List[Dict[str, Any]] = []
+        grouped = self.frames.groupby("pair_id", sort=True)
+        for pair_id, g in grouped:
+            g2 = g.sort_values(["frame_id", "byte_offset"], na_position="last")
+            grouped_rows.append({
+                "pair_id": int(float(pair_id)),
+                "Temperature_K": float(g2["Temperature_K"].iloc[0]),
+                "y": float(g2[y_col].iloc[0]),
+                "byte_offsets": [int(x) for x in g2["byte_offset"].tolist()],
+            })
+        self.pairs = grouped_rows
+
+    def __len__(self):
+        return len(self.pairs)
+
+    def __getitem__(self, i: int) -> Dict[str, Any]:
+        row = self.pairs[i]
+        return {
+            "pair_id": int(row["pair_id"]),
+            "T": float(row["Temperature_K"]),
+            "y": float(row["y"]),
+            "byte_offsets": list(row["byte_offsets"]),
+        }
+
+def make_pair_group_collate(xyz_path: str, center: bool = True):
+    """
+    Returns a collate function that:
+    - reads all selected frames for each pair in batch
+    - flattens into frame-level SchNet inputs
+    - additionally returns frame_to_pair mapping and n_frames per pair
+    """
+    def _collate(samples: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        z_list, pos_list, batch_list, T_frame_list = [], [], [], []
+        y_pair_list, pair_id_list, frame_to_pair_list, n_frames_list = [], [], [], []
+
+        frame_idx = 0
+        with open(xyz_path, "rb") as fh:
+            for pair_idx, s in enumerate(samples):
+                offsets = s["byte_offsets"]
+                n_frames_list.append(len(offsets))
+                y_pair_list.append(float(s["y"]))
+                pair_id_list.append(int(s["pair_id"]))
+                for off in offsets:
+                    Z_np, pos_np = _read_frame_at(fh, int(off))
+                    pos = torch.from_numpy(pos_np)
+                    if center:
+                        pos = pos - pos.mean(dim=0, keepdim=True)
+                    z = torch.from_numpy(Z_np.astype(np.int64))
+                    z_list.append(z)
+                    pos_list.append(pos)
+                    batch_list.append(torch.full((z.shape[0],), frame_idx, dtype=torch.long))
+                    T_frame_list.append(torch.tensor([float(s["T"])], dtype=torch.float32))
+                    frame_to_pair_list.append(pair_idx)
+                    frame_idx += 1
+
+        z = torch.cat(z_list, dim=0)
+        pos = torch.cat(pos_list, dim=0)
+        batch = torch.cat(batch_list, dim=0)
+        T = torch.stack(T_frame_list, dim=0).view(-1, 1)  # [n_frames_total, 1]
+        y = torch.tensor(y_pair_list, dtype=torch.float32).view(-1, 1)  # [B_pairs, 1]
+        pair_id = torch.tensor(pair_id_list, dtype=torch.long).view(-1, 1)  # [B_pairs, 1]
+        frame_to_pair = torch.tensor(frame_to_pair_list, dtype=torch.long)  # [n_frames_total]
+        n_frames = torch.tensor(n_frames_list, dtype=torch.long).view(-1, 1)  # [B_pairs, 1]
+        return {
+            "z": z,
+            "pos": pos,
+            "batch": batch,
+            "T": T,
+            "y": y,
+            "pair_id": pair_id,
+            "frame_to_pair": frame_to_pair,
+            "n_frames": n_frames,
+        }
+    return _collate
