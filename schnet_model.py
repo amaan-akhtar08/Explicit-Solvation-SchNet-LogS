@@ -94,6 +94,16 @@ class SchNet(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, 1)
         )
+        self.attn_score = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.SiLU(),
+            nn.Linear(hidden_dim // 2, 1),
+        )
+        self.pair_readout = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 1),
+        )
         self.cutoff = cutoff
 
     @staticmethod
@@ -131,7 +141,7 @@ class SchNet(nn.Module):
             edge_index = torch.stack([edge_src, edge_dst], dim=0)
         return edge_index, distances
 
-    def forward(self, z, pos, batch, T):
+    def encode_frames(self, z, pos, batch, T):
         """
         Args:
           z: [N] atomic numbers (1..Z)
@@ -156,9 +166,64 @@ class SchNet(nn.Module):
         film_params = self.film(T)  # [B, 2H]
         gamma, beta = film_params.chunk(2, dim=-1)
         h = gamma * pooled + beta
+        return h
 
+    def forward(self, z, pos, batch, T):
+        h = self.encode_frames(z, pos, batch, T)
         y = self.readout(h)  # [B,1], predicts LogS
         return y.squeeze(-1)
+
+    def forward_attention(self, z, pos, batch, T, frame_to_pair):
+        """
+        Attention pooling over frames for pair-level prediction.
+        Args:
+          z,pos,batch,T: frame-level inputs (T is one per frame)
+          frame_to_pair: [n_frames_total], maps frame index -> pair index in batch
+        Returns:
+          y_pair: [B_pairs]
+          attn_weights: [B_pairs, maxK]
+          attn_mask: [B_pairs, maxK]
+        """
+        frame_emb = self.encode_frames(z, pos, batch, T)  # [n_frames_total, H]
+        n_frames, hidden = frame_emb.shape
+        B_pairs = int(frame_to_pair.max().item()) + 1 if n_frames > 0 else 0
+        if B_pairs == 0:
+            return torch.zeros(0, device=frame_emb.device), torch.zeros(0, 0, device=frame_emb.device), torch.zeros(0, 0, dtype=torch.bool, device=frame_emb.device)
+
+        counts = torch.bincount(frame_to_pair, minlength=B_pairs)
+        max_k = int(counts.max().item())
+        padded = frame_emb.new_zeros((B_pairs, max_k, hidden))
+        mask = torch.zeros((B_pairs, max_k), dtype=torch.bool, device=frame_emb.device)
+        offsets = torch.zeros((B_pairs,), dtype=torch.long, device=frame_emb.device)
+
+        for i in range(n_frames):
+            p = int(frame_to_pair[i].item())
+            k = int(offsets[p].item())
+            padded[p, k] = frame_emb[i]
+            mask[p, k] = True
+            offsets[p] += 1
+
+        scores = self.attn_score(padded).squeeze(-1)  # [B, maxK]
+        # scores = scores.masked_fill(~mask, -1e9)
+        # weights = torch.softmax(scores, dim=1)
+        # weights = weights * mask.float()
+        # weights = weights / weights.sum(dim=1, keepdim=True).clamp(min=1e-8)
+
+        # scores: (B, K), mask: (B, K) bool
+
+        scores_fp32 = scores.float()
+        scores_fp32 = scores_fp32.masked_fill(~mask, -1e9)
+        weights = torch.softmax(scores_fp32, dim=1)
+
+        # optional but safe: ensure masked positions are exactly 0 and renormalize
+        weights = weights * mask.float()
+        weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
+
+        weights = weights.to(frame_emb.dtype)  # frame_emb_padded dtype
+        
+        pair_emb = torch.sum(weights.unsqueeze(-1) * padded, dim=1)  # [B, H]
+        y_pair = self.pair_readout(pair_emb).squeeze(-1)
+        return y_pair, weights, mask
 
 def batch_collate(samples: list) -> Dict[str, torch.Tensor]:
     """Collate a list of samples from ExplicitSolvDataset into a batch."""
