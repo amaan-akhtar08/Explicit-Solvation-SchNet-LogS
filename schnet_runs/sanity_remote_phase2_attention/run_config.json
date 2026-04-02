@@ -1,0 +1,73 @@
+{
+  "run_dir": "schnet_runs/sanity_remote_phase2_attention",
+  "agg_mode": "attention",
+  "batch_size_semantics": "pairs_per_batch",
+  "args": {
+    "xyz": "data/combined_filtered_structures_with_energy.xyz",
+    "index_csv": "data/xyz_index.csv",
+    "pair_map_csv": "data/pair_map.csv",
+    "labels_csv": "data/labels_by_pair.csv",
+    "frames_per_pair": 5,
+    "batch_size": 4,
+    "epochs": 2,
+    "lr": 0.001,
+    "weight_decay": 1e-06,
+    "cutoff": 6.0,
+    "hidden": 128,
+    "blocks": 3,
+    "rbf": 32,
+    "num_workers": 0,
+    "run_dir": "schnet_runs/sanity_remote_phase2_attention",
+    "outdir": "schnet_runs",
+    "save_splits": null,
+    "load_splits": "splits",
+    "seed": 1337,
+    "patience": 5,
+    "scheduler": "plateau",
+    "grad_clip": 0.0,
+    "agg": "attention"
+  },
+  "git_commit": null,
+  "deterministic": {
+    "seed": 1337,
+    "pythonhashseed": "1337",
+    "torch_cudnn_deterministic": true,
+    "torch_cudnn_benchmark": false,
+    "worker_seeded": true
+  },
+  "runtime": {
+    "python_version": "3.6.8",
+    "torch_version": "1.10.1+cu102",
+    "cuda_available": true,
+    "torch_cuda_version": "10.2",
+    "cuda_device_name": "Tesla V100-PCIE-32GB",
+    "cudnn_enabled": true,
+    "cudnn_version": 7605,
+    "amp_available": true,
+    "amp_enabled": true,
+    "device": "cuda"
+  },
+  "target_scaler": {
+    "fitted_on": "train_split_only",
+    "mean": -1.3879706467551092,
+    "std": 1.277198809257612
+  },
+  "early_stopping": {
+    "enabled": true,
+    "patience": 5,
+    "stopped_early": false,
+    "stop_epoch": null,
+    "best_epoch": 2,
+    "best_val_rmse": 1.0318599939346313
+  },
+  "history_file": "history.json",
+  "final_metrics": {
+    "rmse": 1.0402171611785889,
+    "mae": 0.7785243988037109,
+    "r2": 0.33093029260635376
+  },
+  "prediction_files": [
+    "pred_val_by_pair.csv",
+    "pred_test_by_pair.csv"
+  ]
+}
