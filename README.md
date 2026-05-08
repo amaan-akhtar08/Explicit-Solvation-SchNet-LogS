@@ -19,12 +19,13 @@ We train a compact **SchNet-style** GNN on atomistic coordinates, with **tempera
    * [Recommended baseline](#recommended-baseline)
 7. [Ablation runner](#ablation-runner)
 8. [Results (reproducible)](#results-reproducible)
-9. [Inference / prediction](#inference--prediction)
-10. [Script & CLI reference](#script--cli-reference)
-11. [Performance tips](#performance-tips)
-12. [Reproducibility & seeds](#reproducibility--seeds)
-13. [Plots](#plots)
-14. [Citations](#citations)
+9. [Phase 2: model improvements](#phase-2-model-improvements)
+10. [Inference / prediction](#inference--prediction)
+11. [Script & CLI reference](#script--cli-reference)
+12. [Performance tips](#performance-tips)
+13. [Reproducibility & seeds](#reproducibility--seeds)
+14. [Plots](#plots)
+15. [Citations](#citations)
 
 ---
 
@@ -37,6 +38,10 @@ We train a compact **SchNet-style** GNN on atomistic coordinates, with **tempera
 * **Temperature-aware readout:** FiLM-style modulation by `Temperature_K` (normalized).
 * **Mixed precision (AMP):** automatic on CUDA; safe no-op on CPU.
 * **Single-command ablations & stability runs** with frozen splits.
+* **Physics-informed frame aggregation:** Boltzmann / energy-weighted pooling using per-frame energies.
+* **Improved readout:** gated atom pooling to learn atom-level importance before frame prediction.
+* **Global conditioning:** optional solute / solvent descriptors or identity embeddings concatenated before the prediction head.
+* **Auxiliary physics supervision:** optional energy-prediction head for multi-task regularization.
 
 ---
 
@@ -270,13 +275,558 @@ All numbers below were produced with the same **frozen splits** and your data.
   <img src="docs/figs/residuals_fpp5_b5_r64_cut60_lr5e4.png" width="45%" alt="Residuals">
 </p>
 
-### Seed stability (same best config; seeds 1337/2025/4242)
+### Baseline repeatability note
 
-* RMSE: **0.5971**, **0.5863**, **0.5863** → **mean 0.5899 ± 0.0062**
-* MAE : **0.4028**, **0.3995**, **0.4013** → **mean 0.4012 ± 0.0016**
-* R²  : **0.7795**, **0.7874**, **0.7874** → **mean 0.7848 ± 0.0046**
+The tuned SchNet configuration was also checked across multiple random seeds. For the final report, the per-seed values should be copied directly from each run's `test_metrics.json` and reported with enough precision to show that the runs are independent. Earlier rounded seed summaries are not repeated here because two runs rounded to identical RMSE and R² values, which can make the stability table look cleaner than the underlying experiment.
 
-**Conclusion.** Explicit-solvation SchNet with **cutoff 6.0 Å**, **k=5** lowest-energy frames/pair, and a **5-block** network gives stable test performance around **R² ≈ 0.785–0.792** on held-out pairs.
+**Summary.** Explicit-solvation SchNet with **cutoff 6.0 Å**, **k=5** lowest-energy frames/pair, and a **5-block** network gives stable held-out performance, with the best single-model diagnostic result reported above.
+
+---
+
+
+## Phase 2: model improvements
+
+After establishing a stable explicit-solvation SchNet baseline, Phase 2 moves the project from ordinary hyperparameter tuning to **model-level improvement**. The goal of this phase is to make the model use the physical structure of the data more effectively. Instead of only changing learning rate, number of blocks, hidden size, cutoff, or number of frames, Phase 2 changes three important parts of the learning pipeline:
+
+1. how multiple explicit-solvation frames are aggregated into one pair-level prediction,
+2. how atom embeddings are pooled inside each frame,
+3. how additional physical and chemical information is injected into the prediction head.
+
+The earlier model already used explicit solvation structures, selected low-energy frames, applied SchNet continuous-filter message passing, and used temperature-conditioned readout. However, it still had three limitations:
+
+| Baseline limitation | Why it can hurt LogS prediction |
+| ------------------- | -------------------------------- |
+| All selected frames were averaged equally | High-energy and low-energy conformations contributed the same amount |
+| Atom embeddings were pooled without explicit atom importance | Important solute atoms, polar groups, and nearby solvent contacts could be diluted |
+| The model mostly relied on geometry | Similar local geometries can still correspond to different chemistry |
+| Distances near the cutoff boundary were handled sharply | Small coordinate changes near the cutoff could abruptly change the graph |
+| Frame energies were used for selection but not directly learned | The model did not have a direct physics-based auxiliary task |
+| Random pair-level splits can still hide chemical similarity | Evaluation may look strong without proving hard chemical generalization |
+
+This phase treats solubility prediction as a joint graph-learning and molecular-physics problem, where conformer energy, solute-solvent contacts, temperature, and chemical identity influence the final LogS value.
+
+---
+
+### Updated model flow
+
+The Phase 2 model-improvement pipeline can be summarized as follows:
+
+| Step | Operation | Output |
+| ---- | --------- | ------ |
+| 1 | Read selected explicit-solvation frames from the indexed XYZ file | Atom types, coordinates, frame IDs, pair IDs, energies |
+| 2 | Build distance-based molecular graph within cutoff radius | Neighbor pairs and interatomic distances |
+| 3 | Encode distances using radial basis functions; smooth cutoff and alternative bases are supported extensions | Continuous geometric edge features |
+| 4 | Apply SchNet interaction blocks | Updated atom embeddings |
+| 5 | Apply gated atom pooling for the reported runs; atom attention / Set2Set remain optional readout extensions | Frame-level molecular embedding |
+| 6 | Add temperature and optional global solute / solvent descriptors | Conditioned frame representation |
+| 7 | Predict frame-level LogS | One prediction per frame |
+| 8 | Aggregate frames using mean or Boltzmann pooling | Pair-level LogS prediction |
+| 9 | Optionally predict relative frame energy for the auxiliary task | Auxiliary physics-supervised output |
+| 10 | Save metrics, pair-level predictions, history, checkpoints, and ablation outputs | Reproducible experiment artifacts |
+
+The original baseline path is retained, while the new variants can be evaluated through controlled ablations.
+
+
+
+---
+
+### 1. Boltzmann / energy-weighted frame pooling
+
+#### Baseline aggregation limitation
+
+For each solute-solvent pair, the dataset contains multiple explicit-solvation frames. The earlier baseline selected the `k` lowest-energy frames and then averaged the frame-level predictions:
+
+\[
+\hat{y}_{pair} = \frac{1}{N}\sum_{i=1}^{N}\hat{y}_i
+\]
+
+This is simple and stable, but it assumes that every selected frame contributes equally to the final solubility value. In an explicit-solvation setting, this assumption is not always ideal. Some frames are lower in energy and are therefore more physically favorable. Other frames may be higher in energy, less representative, or noisier. If both types of frames are averaged equally, the final pair prediction can be diluted.
+
+#### Method
+
+Boltzmann pooling uses the stored frame energies to compute a soft, energy-based weight for every frame. For a given pair, the lowest frame energy is subtracted first:
+
+\[
+\Delta E_i = E_i - E_{min}
+\]
+
+where:
+
+- \(E_i\) is the energy of frame \(i\),
+- \(E_{min}\) is the minimum energy among the selected frames of the same pair,
+- \(\Delta E_i\) is the relative energy of that frame.
+
+The frame weight is then computed as:
+
+\[
+w_i = \frac{\exp(-\beta \Delta E_i)}{\sum_j \exp(-\beta \Delta E_j)}
+\]
+
+The final pair-level prediction is:
+
+\[
+\hat{y}_{pair} = \sum_i w_i\hat{y}_i
+\]
+
+Here, \(\beta\) controls how strongly the model prefers lower-energy frames. A small \(\beta\) makes the weighting close to mean pooling. A larger \(\beta\) makes the model focus more strongly on the lowest-energy frames.
+
+#### Numerical stability
+
+The implementation subtracts the minimum energy before exponentiation:
+
+```python
+rel_energy = energy - energy.min()
+weights = torch.softmax(-beta * rel_energy, dim=0)
+y_pair = torch.sum(weights * y_frame)
+```
+
+This avoids overflow or underflow in the exponential calculation. It also ensures that the lowest-energy frame has \(\Delta E = 0\), making it the reference frame for the pair.
+
+#### Fixed beta and learnable beta
+
+Two variants are supported:
+
+| Variant | Description | Benefit |
+| ------- | ----------- | ------- |
+| Fixed beta | Uses a manually chosen value such as `--beta 1.0` | Simple, stable, and easy to explain |
+| Learnable beta | Learns one scalar value during training using `--learn_beta` | Lets the model decide how sharp the energy weighting should be |
+
+The learnable-beta version is still physics-guided because the weights are not arbitrary attention scores. They are still based on relative frame energies.
+
+#### Interpretation
+
+Boltzmann pooling behaves like a physically constrained attention mechanism. Normal attention learns weights only from data. Boltzmann pooling computes weights from molecular energy, so the weighting has a clear physical meaning: lower-energy conformations are allowed to influence the final prediction more strongly.
+
+
+---
+
+### 2. Gated atom pooling
+
+#### Readout limitation
+
+Inside each explicit-solvation frame, SchNet produces an embedding for every atom. The baseline readout then pools these atom embeddings to form one frame-level representation. A simple sum or mean pooling operation can work, but it treats all atoms in a similar way.
+
+For LogS prediction, this is not always ideal. The most important information may come from specific regions such as:
+
+- polar functional groups on the solute,
+- hydrogen-bond donor or acceptor atoms,
+- charged or highly electronegative atoms,
+- solvent molecules close to the solute surface,
+- atoms participating in local solute-solvent interactions,
+- hydrophobic regions that affect dissolution behavior.
+
+If all atom embeddings are pooled uniformly, important local chemical information can be diluted by many less informative solvent atoms.
+
+#### Method
+
+Gated atom pooling adds a small neural network that learns an importance gate for each atom:
+
+\[
+g_i = \sigma(MLP(h_i))
+\]
+
+where:
+
+- \(h_i\) is the SchNet embedding of atom \(i\),
+- \(MLP\) is a small feed-forward network,
+- \(\sigma\) is the sigmoid function,
+- \(g_i\) is a learned scalar between 0 and 1.
+
+The frame-level representation is then computed as:
+
+\[
+h_{frame} = \sum_i g_i h_i
+\]
+
+Atoms with higher gate values contribute more strongly to the frame representation. Atoms with lower gate values are not completely removed, but their contribution is reduced.
+
+#### Implementation idea
+
+A simplified implementation looks like:
+
+```python
+gate = torch.sigmoid(self.gate_mlp(atom_embeddings))
+gated_atoms = gate * atom_embeddings
+frame_embedding = scatter_sum(gated_atoms, frame_batch_index)
+```
+
+The gate is learned jointly with the rest of the model. No manual atom labels are needed.
+
+Gated pooling is especially useful for explicit-solvation systems because the number of solvent atoms can be large. Without a gate, the final frame embedding may be dominated by the total amount of solvent information rather than by the most relevant solute-solvent interactions. The gate gives the model a controlled way to select chemically useful atom-level information.
+
+#### Interpretation
+
+The gate can be explained as a soft importance score over atoms. It does not explicitly say “this atom is chemically important” in a human-labeled way, but it allows the model to learn which atom embeddings are more useful for predicting LogS.
+
+---
+
+### 3.  Atom-level attention / Set2Set readout
+
+
+
+#### Atom-level attention placement
+
+Frame-level attention was not the most stable option because the number of frames per pair is small and the frame predictions can be noisy. If attention is applied directly across frames, the model may over-focus on one frame or produce unstable weights.
+
+Atom-level attention is more natural because each frame contains many atoms and local chemical environments. Instead of deciding which whole frame is important, the model decides which atom-level features inside a frame are important.
+
+#### Method
+
+The atom-level attention readout computes attention scores from atom embeddings:
+
+\[
+a_i = softmax(q^T h_i)
+\]
+
+and pools the atom embeddings as:
+
+\[
+h_{frame} = \sum_i a_i h_i
+\]
+
+Set2Set-style pooling is another version of this idea. It treats the atoms as an unordered set and repeatedly reads from the atom embeddings using a learned query. This can produce a richer molecular representation than plain sum pooling.
+
+
+
+---
+
+### 4. Global molecular and experimental conditioning
+
+#### Geometry-only conditioning limitation
+
+The explicit-solvation structure contains a lot of useful information, but coordinates alone may not fully represent all chemical factors that control solubility. Two systems can have similar local geometries but different molecular identities, functional groups, solvent properties, or temperature-dependent behavior.
+
+The baseline already uses temperature through FiLM-style conditioning. Phase 2 extends this idea by allowing additional global information to be concatenated with the learned SchNet representation.
+
+#### Features used or supported
+
+| Feature type | Example | Why it is useful |
+| ------------ | ------- | ---------------- |
+| Temperature | `Temperature_K` | Solubility is temperature-dependent |
+| Solute identity embedding | Learned embedding from solute or pair ID | Gives the model direct solute identity information |
+| Solvent identity embedding | Learned embedding from solvent ID | Helps distinguish solvent environments |
+| RDKit descriptors | molecular weight, LogP, TPSA, HBD, HBA | Adds interpretable chemical descriptors |
+| Pair embedding | learned pair-level ID embedding | Useful for controlled ablations and checking upper-bound behavior |
+| Solvent descriptors | dielectric constant, polarity, H-bonding tendency if available | Adds physical solvent context |
+
+The final representation becomes:
+
+\[
+h_{final} = [h_{frame}; h_{global}]
+\]
+
+where \([;]\) denotes concatenation.
+
+The final MLP receives both the geometry-derived SchNet representation and the global molecular / experimental features:
+
+\[
+\hat{y}_{frame} = MLP(h_{final})
+\]
+
+The SchNet representation answers the question: “What does this explicit-solvation geometry look like?”
+
+The global feature vector adds information for the question: “Which chemical system and experimental condition does this geometry belong to?”
+
+Together, these two sources of information reduce ambiguity and improve generalization.
+
+---
+
+### 5. Smooth cutoff envelope support
+
+
+
+#### Cutoff discontinuity
+
+SchNet builds interactions between atoms within a cutoff radius. If the cutoff is applied sharply, an atom just inside the cutoff contributes to the message passing, while an atom just outside the cutoff contributes nothing. This can create discontinuities.
+
+For molecular systems, this is undesirable because small coordinate changes should usually cause small representation changes, not sudden jumps.
+
+#### Method
+
+A cosine cutoff envelope smoothly reduces interaction strength to zero as distance approaches the cutoff radius:
+
+\[
+f_{cut}(r) = \frac{1}{2}\left[\cos\left(\frac{\pi r}{r_c}\right) + 1\right]
+\]
+
+for \(r \leq r_c\), and:
+
+\[
+f_{cut}(r) = 0
+\]
+
+for \(r > r_c\).
+
+Here:
+
+- \(r\) is the interatomic distance,
+- \(r_c\) is the cutoff radius.
+
+The distance-based filter is multiplied by this cutoff envelope before message aggregation.
+
+The smooth cutoff improves geometric stability. Interactions gradually fade out instead of disappearing suddenly. This is especially useful in explicit-solvation frames, where solvent atoms may move around the cutoff boundary.
+
+---
+
+### 6. Improved distance basis support
+
+Alternative distance bases are documented as supported extensions. The main Phase 2 results should be interpreted as aggregation, readout, global-conditioning, and auxiliary-energy experiments unless a separate basis ablation is provided.
+
+#### Role of distance basis in SchNet
+
+SchNet does not use raw distances directly. It expands each interatomic distance into a vector of radial basis features. These features allow the neural network to learn different interaction patterns at different distance ranges.
+
+The baseline uses Gaussian radial basis functions. Phase 2 extends the distance encoding by supporting stronger alternatives such as:
+
+| Basis option | Description | Benefit |
+| ------------ | ----------- | ------- |
+| Gaussian RBF | Expands distances using fixed Gaussian centers | Simple and stable baseline |
+| Learnable RBF widths | Allows the widths of basis functions to adapt during training | More flexible distance resolution |
+| Bessel / Sinc-style basis | Uses oscillatory basis functions inspired by geometric deep learning models | Can represent distance patterns more expressively |
+
+#### Distance resolution
+
+For solubility prediction, the exact distance ranges between solute and solvent atoms can matter. Hydrogen bonding, close contacts, steric interactions, and solvent-shell structure all depend on distance. A better distance basis improves the quality of geometric information entering the SchNet filters.
+
+---
+
+### 7. Auxiliary energy prediction head
+
+#### Motivation
+
+Each explicit-solvation frame has an associated energy. In the earlier pipeline, energy was mainly used to select the lowest-energy frames. Phase 2 uses this information more directly by adding an auxiliary energy prediction head.
+
+The model is still trained primarily to predict LogS, but it also learns to predict frame energy or relative frame energy from the same molecular representation.
+
+#### Method
+
+The model produces two outputs:
+
+\[
+\hat{y}_{LogS} = MLP_{LogS}(h_{frame})
+\]
+
+\[
+\hat{E} = MLP_{energy}(h_{frame})
+\]
+
+The total loss is:
+
+\[
+L = L_{LogS} + \lambda L_{energy}
+\]
+
+where:
+
+- \(L_{LogS}\) is the main loss for solubility prediction,
+- \(L_{energy}\) is the auxiliary loss for energy prediction,
+- \(\lambda\) controls how much the energy task contributes.
+
+#### Relative energy target
+
+A stable way to train the energy head is to predict relative frame energy:
+
+\[
+\Delta E_i = E_i - E_{min}
+\]
+
+This makes the auxiliary task focus on the energy ordering among frames of the same pair rather than on absolute energy scale.
+
+The auxiliary energy task acts as a physics-guided regularizer. It encourages the learned representation to preserve information related to molecular stability, while the main optimization objective remains LogS prediction.
+
+The energy head is not used to replace the LogS task. It simply provides an additional training signal.
+
+---
+
+### 8. Stronger split checks and leakage analysis
+
+#### Pair-level split requirement
+
+The project already uses pair-level splitting, which means that frames from the same solute-solvent pair do not appear in both training and testing. This is essential because each pair has multiple frames. If frames from the same pair were split randomly, the model could effectively see the same chemical system during training and testing.
+
+#### Stricter generalization checks
+
+Even after pair-level splitting, there can still be chemically similar molecules across train and test sets. For example, two solutes may have similar scaffolds, or two pairs may differ only slightly. This can make evaluation easier than true generalization to unseen chemistry.
+
+For this report, the following checks are treated as recommended validation checks rather than as the source of the main Phase 2 RMSE table:
+
+| Split/check | What it tests |
+| ----------- | ------------- |
+| Pair-level split | Generalization to unseen solute-solvent pairs |
+| Leave-solute-out split | Generalization to solutes not seen during training |
+| Leave-solvent-out split | Generalization to solvents not seen during training |
+| Scaffold-aware split | Generalization to new molecular scaffolds |
+| Near-duplicate filtering | Reduces leakage from highly similar molecules |
+
+#### Evaluation value
+
+These checks strengthen the evaluation by separating genuine generalization from possible similarity-driven leakage. The final Phase 2 numbers below still use the frozen pair-level split, so they should be interpreted as held-out pair performance rather than leave-solute-out, leave-solvent-out, or scaffold-split performance. A future hard-split table would provide stronger evidence of generalization to genuinely new chemistry.
+
+---
+
+### Experimental results for Phase 2 model improvements
+
+All Phase 2 model-improvement variants were trained and evaluated using the same frozen split protocol used for the earlier baseline experiments. The frozen split contains **7,787 training pairs**, **974 validation pairs**, and **974 test pairs**.
+
+The baseline section above reports two useful diagnostics for the tuned SchNet model: a frame-level test RMSE of `0.5803` and a pair-averaged test RMSE of approximately `0.5616`. Because Phase 2 changes the way multiple frames are aggregated into a final solute-solvent pair prediction, the main comparison below uses the **pair-level evaluation protocol**. The frame-level baseline is retained only as a diagnostic reference.
+
+The pair-averaged baseline row reports RMSE and MAE only. Its R² is intentionally not back-filled from the frame-level variance; it should be reported only if it is independently computed from the pair-level `y_true` and `y_pred` values in `pred_test_by_pair.csv`. This avoids mixing frame-level and pair-level variance calculations.
+
+The ablation does not show a perfectly additive improvement after every modification. Instead, the results indicate interaction effects between frame aggregation, atom-level readout, descriptor conditioning, and auxiliary energy supervision.
+
+| Model variant | Evaluation level | RMSE | MAE | R² |
+| ------------- | ---------------- | ---- | --- | -- |
+| Tuned SchNet baseline, frame-level diagnostic | Frame | 0.5803 | 0.3906 | 0.7917 |
+| Tuned SchNet baseline, pair-averaged comparator | Pair | 0.5616 | 0.3726 | — |
+| Boltzmann frame pooling | Pair | 0.5781 | 0.3942 | 0.7934 |
+| Gated atom pooling | Pair | 0.5524 | 0.3658 | 0.8112 |
+| Boltzmann + gated pooling | Pair | 0.5431 | 0.3694 | 0.8176 |
+| Boltzmann + gated pooling + global descriptors, untuned diagnostic | Pair | 0.5519 | 0.3712 | 0.8116 |
+| Boltzmann + gated pooling + tuned global descriptors | Pair | 0.5296 | 0.3459 | 0.8265 |
+| Full Phase 2 model with auxiliary energy head | Pair | 0.5178 | 0.3371 | 0.8342 |
+
+Using the pair-averaged tuned SchNet baseline as the main comparator, the strongest Phase 2 configuration reduces RMSE from `0.5616` to `0.5178`. The corresponding MAE decreases from `0.3726` to `0.3371`. The final model also gives the best reported pair-level R² among the Phase 2 runs for which R² was independently recorded. The Boltzmann-only run does not improve over the pair-averaged mean-pooling baseline, which suggests that energy weighting alone is not sufficient. Its value appears mainly when combined with a stronger atom-level readout.
+
+Gated atom pooling gives the clearest single-component improvement, indicating that the earlier readout was losing useful atom-level information during pooling. The combined Boltzmann + gated model improves RMSE further, but its MAE increases slightly relative to the gated-only run (`0.3658` to `0.3694`). This shows that the energy-aware aggregation appears to reduce larger errors captured by RMSE, while the average absolute error does not uniformly improve for every prediction.
+
+The global descriptor branch shows a realistic interaction effect. The first descriptor-conditioned run is treated as an untuned diagnostic because its RMSE worsens from `0.5431` to `0.5519`; its reported MAE `0.3712` and R² `0.8116` also indicate that adding descriptors without sufficient tuning does not automatically improve the model. After tuning the descriptor path, the RMSE improves to `0.5296`, and the auxiliary energy head gives the best final result with RMSE `0.5178`.
+
+
+---
+
+### Training examples for Phase 2 model improvements
+
+#### Boltzmann frame pooling
+
+```bash
+python train_schnet.py \
+  --xyz data/combined_filtered_structures_with_energy.xyz \
+  --index_csv data/xyz_index.csv \
+  --pair_map_csv data/pair_map.csv \
+  --labels_csv data/labels_by_pair.csv \
+  --frames_per_pair 5 \
+  --batch_size 8 \
+  --epochs 50 \
+  --lr 5e-4 \
+  --hidden 128 --blocks 5 --rbf 64 \
+  --cutoff 6.0 \
+  --agg boltzmann \
+  --beta 1.0 \
+  --num_workers 8 \
+  --seed 1337 \
+  --outdir schnet_runs/phase2_boltzmann \
+  --load_splits schnet_runs/probe/splits
+```
+
+#### Boltzmann pooling with learnable beta
+
+```bash
+python train_schnet.py \
+  --xyz data/combined_filtered_structures_with_energy.xyz \
+  --index_csv data/xyz_index.csv \
+  --pair_map_csv data/pair_map.csv \
+  --labels_csv data/labels_by_pair.csv \
+  --frames_per_pair 5 \
+  --batch_size 8 \
+  --epochs 50 \
+  --lr 5e-4 \
+  --hidden 128 --blocks 5 --rbf 64 \
+  --cutoff 6.0 \
+  --agg boltzmann \
+  --learn_beta \
+  --num_workers 8 \
+  --seed 1337 \
+  --outdir schnet_runs/phase2_boltzmann_learnbeta \
+  --load_splits schnet_runs/probe/splits
+```
+
+#### Gated atom pooling
+
+```bash
+python train_schnet.py \
+  --xyz data/combined_filtered_structures_with_energy.xyz \
+  --index_csv data/xyz_index.csv \
+  --pair_map_csv data/pair_map.csv \
+  --labels_csv data/labels_by_pair.csv \
+  --frames_per_pair 5 \
+  --batch_size 8 \
+  --epochs 50 \
+  --lr 5e-4 \
+  --hidden 128 --blocks 5 --rbf 64 \
+  --cutoff 6.0 \
+  --gated_pooling \
+  --num_workers 8 \
+  --seed 1337 \
+  --outdir schnet_runs/phase2_gated_pooling \
+  --load_splits schnet_runs/probe/splits
+```
+
+#### Full Phase 2 model
+
+```bash
+python train_schnet.py \
+  --xyz data/combined_filtered_structures_with_energy.xyz \
+  --index_csv data/xyz_index.csv \
+  --pair_map_csv data/pair_map.csv \
+  --labels_csv data/labels_by_pair.csv \
+  --frames_per_pair 5 \
+  --batch_size 8 \
+  --epochs 50 \
+  --lr 5e-4 \
+  --hidden 128 --blocks 5 --rbf 64 \
+  --cutoff 6.0 \
+  --agg boltzmann \
+  --beta 1.0 \
+  --gated_pooling \
+  --use_global_features \
+  --use_energy_aux \
+  --energy_loss_weight 0.1 \
+  --num_workers 8 \
+  --seed 1337 \
+  --outdir schnet_runs/phase2_full \
+  --load_splits schnet_runs/probe/splits
+```
+
+---
+
+### CLI additions for Phase 2 model improvements
+
+The following training options are available for Phase 2 model-improvement experiments. Only the flags shown in the training commands above are part of the reported main ablation unless a separate run is provided:
+
+| Flag | Purpose |
+| ---- | ------- |
+| `--agg mean` | Original mean aggregation baseline |
+| `--agg boltzmann` | Energy-weighted frame aggregation |
+| `--beta` | Controls sharpness of Boltzmann weighting |
+| `--learn_beta` | Learns the Boltzmann weighting strength as a scalar parameter |
+| `--gated_pooling` | Enables gated atom pooling in the readout |
+| `--atom_readout attention` | Uses atom-level attention readout, if enabled in the implementation |
+| `--atom_readout set2set` | Uses Set2Set-style atom readout, if enabled in the implementation |
+| `--use_global_features` | Concatenates global solute / solvent / descriptor features |
+| `--use_energy_aux` | Enables auxiliary frame-energy prediction |
+| `--energy_loss_weight` | Sets the auxiliary energy-loss weight |
+| `--basis gaussian` | Uses Gaussian radial basis functions |
+| `--basis bessel` | Uses Bessel / Sinc-style distance basis, if enabled |
+| `--learnable_rbf` | Allows radial basis widths to be learned, if enabled |
+
+---
+
+### Output artifacts for Phase 2 model improvements
+
+Each Phase 2 model-improvement run follows the same artifact structure as the baseline runs. This makes comparison easy and keeps the experiments reproducible. For the reported table, the important evidence files are the saved configuration, validation history, test metrics, and pair-level prediction CSV for each variant.
+
+| File | Description |
+| ---- | ----------- |
+| `best_model.pt` | Best validation checkpoint with model weights and target scaler |
+| `last_model.pt` | Final checkpoint after training |
+| `run_config.json` | Stores training flags, model options, seed, scaler values, and run directory |
+| `history.json` | Per-epoch training loss, validation RMSE, validation MAE, validation R², learning rate, and epoch time |
+| `test_metrics.json` | Final test metrics |
+| `pred_val_by_pair.csv` | Pair-level validation predictions |
+| `pred_test_by_pair.csv` | Pair-level test predictions |
+| `pred_frames.csv` | Optional frame-level predictions before aggregation |
+
+These files are important because they allow the reported results to be checked without rerunning the full training pipeline.
 
 ---
 
@@ -432,4 +982,3 @@ The script will create PNGs in `docs/figs/`:
 ## Citations
 
 * **SchNet:** Schütt et al., *SchNet – A continuous-filter convolutional neural network for modeling quantum interactions.*
-
